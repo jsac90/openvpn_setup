@@ -1,0 +1,171 @@
+Because the guides online STILL SUCK!
+Ubuntu 22.04
+Openvpn 2.5.5
+Openssl 3.0.2
+Easyrsa 3
+
+Install
+sudo apt-get install openvpn easy-rsa
+
+
+mkdir ~/easy-rsa
+ln -s /usr/share/easy-rsa/* ~/easy-rsa/
+chmod 700 /home/YOURUSERNAME/easy-rsa
+cd ~/easy-rsa
+./easyrsa init-pki
+cd ~/easy-rsa
+nano vars
+ENTER THE FOLLOWING:
+
+set_var EASYRSA_REQ_COUNTRY    "US"
+set_var EASYRSA_REQ_PROVINCE   "NewYork"
+set_var EASYRSA_REQ_CITY       "New York City"
+set_var EASYRSA_REQ_ORG        "DigitalOcean"
+set_var EASYRSA_REQ_EMAIL      "admin@example.com"
+set_var EASYRSA_REQ_OU         "Community"
+set_var EASYRSA_ALGO           "ec"
+set_var EASYRSA_DIGEST         "sha512"
+THEN CTRL+O TO SAVE AND CTRL+X TO EXIT
+
+./easyrsa build-ca 
+HIT ENTER (DONT MODIFY ANYTHING)
+sudo cp ~/easy-rsa/pki/ca.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+ ./easyrsa gen-req server nopass
+HIT ENTER (DONT MODIFY ANYTHING)
+sudo cp /home/YOURUSERNAME/easy-rsa/pki/private/server.key /etc/openvpn/server/
+cd ~/easy-rsa
+./easyrsa import-req /home/YOURUSERNAME/easy-rsa/pki/reqs/server.req server
+Ignore the error
+./easyrsa sign-req server server
+sudo cp pki/issued/server.crt /etc/openvpn/server
+sudo cp pki/ca.crt /etc/openvpn/server
+openvpn --genkey secret ta.key
+sudo cp ta.key /etc/openvpn/server
+mkdir -p ~/client-configs/keys
+chmod -R 700 ~/client-configs
+./easyrsa gen-req client1 nopass
+Hit enter - dont change anything
+cp pki/private/client1.key ~/client-configs/keys/
+./easyrsa import-req pki/reqs/client1.req client1
+Ignore the errors
+./easyrsa sign-req client client1
+Put in the CA password when prompted - NOT THE CLIENT PW
+cp pki/issued/client1.crt ~/client-configs/keys/
+cp ~/easy-rsa/ta.key ~/client-configs/keys/
+sudo cp /etc/openvpn/server/ca.crt ~/client-configs/keys/
+sudo chown YOURUSERNAME.YOURUSERNAME ~/client-configs/keys/*
+sudo cp /usr/share/doc/openvpn/examples/sample-config-files/server.conf /etc/openvpn/server/
+sudo nano /etc/openvpn/server/server.conf
+PUT A “;” IN FRONT OF “dh dh2048.pem”
+ADD “dh none” RIGHT UNDER THAT
+PUT A “;” IN FRONT OF “tls-auth ta.key 0 # This file is secret”
+ADD "tls-crypt ta.key” UNDER THAT
+PUT A “;” IN FRONT OF “cipher AES-256-CBC”
+ADD “cipher AES-256-GCM” RIGHT UNDER THAT
+ADD “auth SHA256” RIGHT UNDER THAT
+REMOVE ; FROM “user nobody”
+REMOVE ; FROM “group nogroup”
+Warning - might say group nobody - make sure it says nogroup
+Uncomment push "redirect-gateway def1 bypass-dhcp"
+Uncomment push "dhcp-option DNS 208.67.222.222"
+Uncomment push "dhcp-option DNS 208.67.220.220"
+Ctrl+o and Ctrl+x
+sudo nano /etc/sysctl.conf
+Add “net.ipv4.ip_forward = 1” to bottom of file
+Ctrl+o and Ctrl+x
+sudo sysctl -p
+ip route list default
+Take note of your adapter after the word “dev”
+sudo nano /etc/ufw/before.rules
+Paste the following before “dont delete” 
+# START OPENVPN RULES
+# NAT table rules
+*nat
+:POSTROUTING ACCEPT [0:0]
+# Allow traffic from OpenVPN client to eth0 (change to the interface you discovered!)
+-A POSTROUTING -s 10.8.0.0/8 -o eth0 -j MASQUERADE
+COMMIT
+# END OPENVPN RULES
+
+
+sudo nano /etc/default/ufw
+Change default forward policy from drop to accept
+DEFAULT_FORWARD_POLICY="ACCEPT"
+sudo ufw allow 1194/udp
+sudo ufw allow OpenSSH
+sudo ufw disable
+sudo ufw enable
+sudo systemctl -f enable openvpn-server@server.service
+mkdir -p ~/client-configs/files
+cp /usr/share/doc/openvpn/examples/sample-config-files/client.conf ~/client-configs/base.conf
+nano ~/client-configs/base.conf
+MAKE SURE YOU KNOW YOUR PUBLIC IP PRIOR TO THIS STEP
+ALTERNATIVELY - MAKE SURE YOU HAVE A DOMAIN YOU CAN POINT TO THAT POINTS AT YOUR IP
+Comment out remote server and add remote your_server_ip 1194
+Uncomment out user nobody
+Uncomment out group nogroup
+Warning - might say group nobody - make sure it says nogroup
+Comment out ;ca ca.crt
+Comment out ;cert client.crt
+Comment out ;key client.key
+Comment out ;tls-auth ta.key 1
+Add cipher AES-256-GCM
+Add auth SHA256
+Add key-direction 1
+Add ; script-security 2
+Add ; up /etc/openvpn/update-resolv-conf
+Add ; down /etc/openvpn/update-resolv-conf
+Add ; script-security 2
+Add ; up /etc/openvpn/update-systemd-resolved
+Add ; down /etc/openvpn/update-systemd-resolved
+Add ; down-pre
+Add ; dhcp-option DOMAIN-ROUTE .
+Ctrl + o and ctrl + X
+cd ~/client-configs/files
+nano ~/client-configs/make_config.sh
+paste the following
+#!/bin/bash
+ 
+# First argument: Client identifier
+ 
+KEY_DIR=~/client-configs/keys
+OUTPUT_DIR=~/client-configs/files
+BASE_CONFIG=~/client-configs/base.conf
+ 
+cat ${BASE_CONFIG} \
+    <(echo -e '<ca>') \
+    ${KEY_DIR}/ca.crt \
+    <(echo -e '</ca>\n<cert>') \
+    ${KEY_DIR}/${1}.crt \
+    <(echo -e '</cert>\n<key>') \
+    ${KEY_DIR}/${1}.key \
+    <(echo -e '</key>\n<tls-crypt>') \
+    ${KEY_DIR}/ta.key \
+    <(echo -e '</tls-crypt>') \
+    > ${OUTPUT_DIR}/${1}.ovpn
+ 
+Ctrl+o and ctrl+x
+chmod 700 ~/client-configs/make_config.sh
+cd ~/client-configs
+./make_config.sh client1
+
+
+To make additional clients
+cd ~/easy-rsa
+./easyrsa gen-req CLIENTNAMEHERE
+If dont want password, add nopass to end of above
+cp pki/private/CLIENTNAMEHERE.key ~/client-configs/keys/
+./easyrsa import-req pki/reqs/CLIENTNAMEHERE.req CLIENTNAMEHERE
+Ignore the error
+./easyrsa sign-req client CLIENTNAMEHERE
+Put in the CA password when prompted - NOT THE CLIENT PW
+cp pki/issued/CLIENTNAMEHERE.crt ~/client-configs/keys/
+cd ~/client-configs
+./make_config.sh CLIENTNAMEHERE 
+Do not run as sudo
+Sudo cp /files/CLIENTNAMEHERE.ovpn /media/bunker/clientnamehere.ovpn
+
+
+
+
